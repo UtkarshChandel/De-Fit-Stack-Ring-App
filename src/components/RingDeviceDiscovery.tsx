@@ -4,20 +4,19 @@
  * Following the official guide sequence
  */
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   FlatList,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from "react-native";
-import {
-  ConnectionState,
-  cleanRingConnection,
-} from "../ring/connection/CleanRingConnection";
+import { cleanRingConnection } from "../ring/connection/CleanRingConnection";
+import { devicePersistence } from "../ring/persistence/EnhancedDevicePersistence";
 import { useRingStore } from "../ring/state/ringStore";
 import { SmartRingX1 } from "../types/ring";
 
@@ -104,45 +103,205 @@ const DeviceCard: React.FC<DeviceCardProps> = ({
   );
 };
 
+// Connection status messages for different phases
+const CONNECTION_MESSAGES = {
+  checkingStorage: "Checking for previously paired devices...",
+  startingScan: "Initializing Bluetooth scanner...",
+  scanning: "Scanning for Ring devices nearby...",
+  deviceFound: "Ring device found!",
+  connecting: "Connecting to Ring...",
+  retrievingServices: "Retrieving device services...",
+  verifyingDevice: "Verifying Ring device...",
+  settingUpNotifications: "Setting up notifications...",
+  fetchingDeviceInfo: "Fetching device information...",
+  performingOEM: "Performing OEM verification...",
+  syncingData: "Syncing device data...",
+  connected: "Successfully connected!",
+  error: "Connection failed",
+};
+
 export const RingDeviceDiscovery: React.FC = () => {
-  const [phase, setPhase] = useState<ConnectionState>(ConnectionState.IDLE);
   const [isScanning, setIsScanning] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [devices, setDevices] = useState<SmartRingX1[]>([]);
+  const [autoConnecting, setAutoConnecting] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<string>("");
+  const [progressAnimation] = useState(new Animated.Value(0));
+  const hasAutoConnected = useRef(false);
+  const autoConnectTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasCheckedForPairedDevice = useRef(false);
+  const isInitializing = useRef(false);
 
   const discoveredDevices = useRingStore((state) => state.discoveredDevices);
-  const connectionStatus = useRingStore((state) => state.connectionStatus);
 
   useEffect(() => {
-    // Check for paired device on mount
-    checkPairedDevice();
+    // Only check for paired device once on mount
+    if (!hasCheckedForPairedDevice.current && !isInitializing.current) {
+      hasCheckedForPairedDevice.current = true;
+      isInitializing.current = true;
+      checkPairedDevice();
+    }
+  }, []); // Empty dependency array - only run once on mount
 
+  useEffect(() => {
     // Update devices when store changes
-    setDevices(Array.from(discoveredDevices.values()));
-  }, [discoveredDevices]);
+    setDevices(discoveredDevices);
+
+    // Auto-connect to first Ring device found if not already connected
+    if (
+      discoveredDevices.length > 0 &&
+      !isConnecting &&
+      !hasAutoConnected.current &&
+      !autoConnecting // Don't auto-connect if we're already trying to connect to a paired device
+    ) {
+      // Clear any existing timeout
+      if (autoConnectTimeout.current) {
+        clearTimeout(autoConnectTimeout.current);
+      }
+
+      // Wait a bit to ensure device is stable, then auto-connect
+      autoConnectTimeout.current = setTimeout(() => {
+        const firstDevice = discoveredDevices[0];
+        if (firstDevice && !hasAutoConnected.current && !isConnecting && !autoConnecting) {
+          console.log(
+            "🎯 Auto-connecting to discovered Ring device:",
+            firstDevice.name
+          );
+          hasAutoConnected.current = true;
+          handleConnect(firstDevice.id);
+        }
+      }, 2000); // Wait 2 seconds after discovery before auto-connecting
+    }
+  }, [discoveredDevices, isConnecting, autoConnecting]); // Add dependencies
+
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (autoConnectTimeout.current) {
+        clearTimeout(autoConnectTimeout.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    // Start progress animation when auto-connecting or scanning
+    if (autoConnecting || isScanning) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(progressAnimation, {
+            toValue: 1,
+            duration: 1500,
+            useNativeDriver: true,
+          }),
+          Animated.timing(progressAnimation, {
+            toValue: 0,
+            duration: 1500,
+            useNativeDriver: true,
+          }),
+        ])
+      ).start();
+    } else {
+      progressAnimation.setValue(0);
+    }
+  }, [autoConnecting, isScanning]);
 
   const checkPairedDevice = async () => {
-    const hasPaired = await cleanRingConnection.autoConnect();
-    if (hasPaired) {
-      Alert.alert(
-        "Connected",
-        "Successfully reconnected to your paired Ring device",
-        [{ text: "OK" }]
-      );
+    try {
+      // Check if we have a stored device
+      const storedDevice = await devicePersistence.getPairedDevice();
+
+      if (storedDevice) {
+        hasAutoConnected.current = true; // Prevent auto-connect if we're already trying paired device
+        setAutoConnecting(true);
+        setConnectionStatus(CONNECTION_MESSAGES.checkingStorage);
+
+        // Small delay for UI to update
+        await new Promise((resolve) => setTimeout(resolve, 500));
+
+        setConnectionStatus(CONNECTION_MESSAGES.connecting);
+        const hasPaired = await cleanRingConnection.autoConnect();
+
+        if (hasPaired) {
+          setConnectionStatus(CONNECTION_MESSAGES.connected);
+          isInitializing.current = false;
+          setTimeout(() => {
+            setAutoConnecting(false);
+            Alert.alert(
+              "Connected",
+              "Successfully reconnected to your paired Ring device",
+              [{ text: "OK" }]
+            );
+          }, 1000);
+        } else {
+          // Reset flag if paired device connection failed, so we can try new devices
+          hasAutoConnected.current = false;
+          setAutoConnecting(false);
+          setConnectionStatus("");
+          isInitializing.current = false;
+
+          // Start scanning for new devices only once
+          if (!isScanning) {
+            console.log(
+              "📱 Paired device not found, starting scan for new devices..."
+            );
+            setTimeout(() => handleStartScan(), 1000);
+          }
+        }
+      } else {
+        // No paired device, start scanning immediately
+        isInitializing.current = false;
+        if (!isScanning) {
+          console.log("🔍 No paired device found, starting scan...");
+          setTimeout(() => handleStartScan(), 500);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to check paired device:", error);
+      hasAutoConnected.current = false;
+      setAutoConnecting(false);
+      setConnectionStatus("");
+      isInitializing.current = false;
+      // Start scanning on error only if not already scanning
+      if (!isScanning) {
+        setTimeout(() => handleStartScan(), 1000);
+      }
     }
   };
 
   const handleStartScan = async () => {
+    // Prevent multiple scans
+    if (isScanning) {
+      console.log("⚠️ Scan already in progress, skipping...");
+      return;
+    }
+
     try {
       setIsScanning(true);
+      setConnectionStatus(CONNECTION_MESSAGES.startingScan);
+
+      // Small delay for UI feedback
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      setConnectionStatus(CONNECTION_MESSAGES.scanning);
       await cleanRingConnection.startScan();
+
+      // Monitor for devices being found
+      const checkInterval = setInterval(() => {
+        const currentDevices = useRingStore.getState().discoveredDevices;
+        if (currentDevices.length > 0) {
+          setConnectionStatus(`Found ${currentDevices.length} Ring device(s)`);
+        }
+      }, 1000);
 
       // Auto-stop after scan duration
       setTimeout(() => {
+        clearInterval(checkInterval);
         setIsScanning(false);
+        setConnectionStatus("");
       }, 10000);
     } catch (error) {
       setIsScanning(false);
+      setConnectionStatus("");
       Alert.alert(
         "Scan Error",
         "Failed to start scanning. Please ensure Bluetooth is enabled."
@@ -158,15 +317,37 @@ export const RingDeviceDiscovery: React.FC = () => {
   const handleConnect = async (deviceId: string) => {
     try {
       setIsConnecting(true);
+      hasAutoConnected.current = true; // Mark that we've attempted connection
+      setConnectionStatus(CONNECTION_MESSAGES.connecting);
+
+      // Monitor connection progress through store updates
+      const updateInterval = setInterval(() => {
+        const info1 = useRingStore.getState().deviceInfo1;
+        const battery = useRingStore.getState().batteryData;
+
+        if (info1 && !battery) {
+          setConnectionStatus(CONNECTION_MESSAGES.fetchingDeviceInfo);
+        } else if (battery) {
+          setConnectionStatus(CONNECTION_MESSAGES.syncingData);
+        }
+      }, 500);
+
       const success = await cleanRingConnection.connectAndSetup(deviceId);
 
+      clearInterval(updateInterval);
+
       if (success) {
-        Alert.alert(
-          "Connected",
-          "Successfully connected and configured your Ring device",
-          [{ text: "OK" }]
-        );
+        setConnectionStatus(CONNECTION_MESSAGES.connected);
+        setTimeout(() => {
+          Alert.alert(
+            "Connected",
+            "Successfully connected and configured your Ring device",
+            [{ text: "OK" }]
+          );
+        }, 1000);
       } else {
+        hasAutoConnected.current = false; // Reset flag on failure so user can retry
+        setConnectionStatus(CONNECTION_MESSAGES.error);
         Alert.alert(
           "Connection Failed",
           "Failed to connect to the Ring device. Please try again.",
@@ -174,9 +355,13 @@ export const RingDeviceDiscovery: React.FC = () => {
         );
       }
     } catch (error) {
+      setConnectionStatus(CONNECTION_MESSAGES.error);
       Alert.alert("Error", "An error occurred while connecting");
     } finally {
-      setIsConnecting(false);
+      setTimeout(() => {
+        setIsConnecting(false);
+        setConnectionStatus("");
+      }, 2000);
     }
   };
 
@@ -189,13 +374,55 @@ export const RingDeviceDiscovery: React.FC = () => {
     </View>
   );
 
+  // Show loading screen during auto-connection or initial scanning
+  if (autoConnecting || (isScanning && devices.length === 0)) {
+    return (
+      <View style={styles.loadingContainer}>
+        <View style={styles.loadingContent}>
+          <Animated.View
+            style={[
+              styles.loadingRing,
+              {
+                transform: [
+                  {
+                    rotate: progressAnimation.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: ["0deg", "360deg"],
+                    }),
+                  },
+                  {
+                    scale: progressAnimation.interpolate({
+                      inputRange: [0, 0.5, 1],
+                      outputRange: [1, 1.2, 1],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          >
+            <View style={styles.ringOuter}>
+              <View style={styles.ringInner} />
+            </View>
+          </Animated.View>
+
+          <Text style={styles.loadingTitle}>De-Ring ⌬</Text>
+          <Text style={styles.loadingStatus}>{connectionStatus}</Text>
+
+          <View style={styles.loadingDotsContainer}>
+            <ActivityIndicator size="small" color="#2196F3" />
+          </View>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>Ring Device Discovery</Text>
         <Text style={styles.subtitle}>
           {isScanning
-            ? "Scanning for devices..."
+            ? connectionStatus || "Scanning for devices..."
             : "Tap scan to find your Ring"}
         </Text>
       </View>
@@ -218,6 +445,17 @@ export const RingDeviceDiscovery: React.FC = () => {
           <Text style={styles.scanButtonText}>Start Scan</Text>
         )}
       </TouchableOpacity>
+
+      {isConnecting && connectionStatus && (
+        <View style={styles.connectionStatusBar}>
+          <ActivityIndicator
+            size="small"
+            color="#2196F3"
+            style={{ marginRight: 8 }}
+          />
+          <Text style={styles.connectionStatusText}>{connectionStatus}</Text>
+        </View>
+      )}
 
       <FlatList
         data={devices}
@@ -247,6 +485,75 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: "#F5F5F5",
+  },
+  loadingContainer: {
+    flex: 1,
+    backgroundColor: "#FFFFFF",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  loadingContent: {
+    alignItems: "center",
+    padding: 32,
+  },
+  loadingRing: {
+    width: 120,
+    height: 120,
+    justifyContent: "center",
+    alignItems: "center",
+    marginBottom: 32,
+  },
+  ringOuter: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    borderWidth: 12,
+    borderColor: "#2196F3",
+    justifyContent: "center",
+    alignItems: "center",
+    shadowColor: "#2196F3",
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
+    elevation: 5,
+  },
+  ringInner: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "#E3F2FD",
+  },
+  loadingTitle: {
+    fontSize: 28,
+    fontWeight: "bold",
+    color: "#333",
+    marginBottom: 8,
+  },
+  loadingStatus: {
+    fontSize: 16,
+    color: "#666",
+    textAlign: "center",
+    marginBottom: 24,
+    minHeight: 20,
+  },
+  loadingDotsContainer: {
+    height: 20,
+  },
+  connectionStatusBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: "#E3F2FD",
+    marginHorizontal: 16,
+    marginTop: -8,
+    borderRadius: 8,
+  },
+  connectionStatusText: {
+    fontSize: 14,
+    color: "#2196F3",
+    fontWeight: "500",
   },
   header: {
     padding: 20,

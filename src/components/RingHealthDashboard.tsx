@@ -85,7 +85,6 @@ const SleepStage: React.FC<SleepStageProps> = ({
 
 export const RingHealthDashboard: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
-  const [loadingHistorical, setLoadingHistorical] = useState(false);
   const [monitoringActive, setMonitoringActive] = useState(false);
   const [monitoringLoading, setMonitoringLoading] = useState(false);
   const [syncingSteps, setSyncingSteps] = useState(false);
@@ -99,6 +98,7 @@ export const RingHealthDashboard: React.FC = () => {
   const sleepData = useRingStore((state) => state.sleepData);
   const historicalData = useRingStore((state) => state.historicalData);
   const connectionStatus = useRingStore((state) => state.connectionStatus);
+  const isHistoricalDataLoading = useRingStore((state) => state.isHistoricalDataLoading);
 
   const isConnected = !!connectionStatus?.isConnected;
 
@@ -117,15 +117,12 @@ export const RingHealthDashboard: React.FC = () => {
   };
 
   const handleFetchHistorical = async () => {
-    if (!isConnected) return;
+    if (!isConnected || isHistoricalDataLoading) return;
 
-    setLoadingHistorical(true);
     try {
       await cleanRingConnection.fetchHistoricalData();
     } catch (error) {
       console.error("Failed to fetch historical data:", error);
-    } finally {
-      setLoadingHistorical(false);
     }
   };
 
@@ -265,6 +262,17 @@ export const RingHealthDashboard: React.FC = () => {
             icon="👟"
             color="#4CAF50"
           />
+          <TouchableOpacity
+            style={[styles.fetchButton, { marginTop: 8 }]}
+            onPress={handleSyncSteps}
+            disabled={syncingSteps}
+          >
+            {syncingSteps ? (
+              <ActivityIndicator size="small" color="#2196F3" />
+            ) : (
+              <Text style={styles.fetchButtonText}>Sync Steps</Text>
+            )}
+          </TouchableOpacity>
           <MetricCard
             title="SpO2"
             value={currentHealthReading?.bloodOxygen ?? "--"}
@@ -359,9 +367,9 @@ export const RingHealthDashboard: React.FC = () => {
           <TouchableOpacity
             style={styles.fetchButton}
             onPress={handleFetchHistorical}
-            disabled={loadingHistorical}
+            disabled={isHistoricalDataLoading}
           >
-            {loadingHistorical ? (
+            {isHistoricalDataLoading ? (
               <ActivityIndicator size="small" color="#2196F3" />
             ) : (
               <Text style={styles.fetchButtonText}>Fetch Data</Text>
@@ -372,16 +380,23 @@ export const RingHealthDashboard: React.FC = () => {
         {historicalData.length > 0 ? (
           <View style={styles.historicalList}>
             <Text style={styles.historicalCount}>
-              {historicalData.length} records available
+              {historicalData.length} unique records available
             </Text>
             <Text style={styles.historicalHint}>
-              Last sync:{" "}
-              {new Date(historicalData[0].timeStamp).toLocaleString()}
+              Latest record:{" "}
+              {new Date(historicalData[historicalData.length - 1]?.timeStamp || Date.now()).toLocaleString()}
             </Text>
+            {isHistoricalDataLoading && (
+              <Text style={styles.historicalHint}>
+                Fetching new data...
+              </Text>
+            )}
           </View>
         ) : (
           <Text style={styles.noDataText}>
-            No historical data available. Tap "Fetch Data" to retrieve.
+            {isHistoricalDataLoading
+              ? "Fetching historical data..."
+              : "No historical data available. Tap \"Fetch Data\" to retrieve."}
           </Text>
         )}
       </View>
