@@ -88,18 +88,14 @@ cp .env.example .env
 Configure your environment variables:
 
 ```env
-# Hedera Configuration
-HEDERA_NETWORK=testnet
-HEDERA_ACCOUNT_ID=your_account_id
-HEDERA_PRIVATE_KEY=your_private_key
+
 
 # Oracle Configuration
 ORACLE_API_ENDPOINT=https://your-oracle-endpoint.com
-ORACLE_API_KEY=your_oracle_api_key
+
 
 # App Configuration
 ENABLE_DEBUG_MODE=false
-ENCRYPTION_KEY=your_encryption_key
 ```
 
 ### 4. Configure OEM SDKs
