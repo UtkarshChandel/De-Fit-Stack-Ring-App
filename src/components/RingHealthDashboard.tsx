@@ -3,7 +3,7 @@
  * Displays real-time health metrics and historical data
  */
 
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   ActivityIndicator,
   RefreshControl,
@@ -16,6 +16,7 @@ import {
 import { cleanRingConnection } from "../ring/connection/CleanRingConnection";
 import { useRingStore } from "../ring/state/ringStore";
 import { SleepData } from "../types/ring";
+import { GoalAchievementModal } from "./GoalAchievementModal";
 
 interface MetricCardProps {
   title: string;
@@ -87,18 +88,57 @@ export const RingHealthDashboard: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [monitoringActive, setMonitoringActive] = useState(false);
   const [monitoringLoading, setMonitoringLoading] = useState(false);
-  const [syncingSteps, setSyncingSteps] = useState(false);
+  const [showGoalModal, setShowGoalModal] = useState(false);
+  const [highestHeartRate, setHighestHeartRate] = useState(0);
+  const [hasShownGoalModal, setHasShownGoalModal] = useState(false);
+  const [hasClaimedReward, setHasClaimedReward] = useState(false);
+  const previousHeartRateRef = useRef<number>(0);
 
   const currentHealthReading = useRingStore(
     (state) => state.currentHealthReading
   );
-  const steps = useRingStore((state) => state.steps);
-  const temperature = useRingStore((state) => state.temperature);
   const batteryData = useRingStore((state) => state.batteryData);
   const sleepData = useRingStore((state) => state.sleepData);
   const historicalData = useRingStore((state) => state.historicalData);
   const connectionStatus = useRingStore((state) => state.connectionStatus);
   const isHistoricalDataLoading = useRingStore((state) => state.isHistoricalDataLoading);
+
+  // Analyze heart rate data for goal achievement
+  useEffect(() => {
+    // Check both current real-time data and historical data
+    let maxHeartRate = 0;
+
+    // Check current health reading
+    if (currentHealthReading?.heartRate) {
+      const currentHR = currentHealthReading.heartRate;
+      if (currentHR > maxHeartRate) {
+        maxHeartRate = currentHR;
+      }
+      console.log(`Current heart rate: ${currentHR} bpm`);
+    }
+
+    // Check historical data
+    if (historicalData && historicalData.length > 0) {
+      historicalData.forEach(data => {
+        if (data.heartRate && data.heartRate > maxHeartRate) {
+          maxHeartRate = data.heartRate;
+        }
+      });
+    }
+
+    // Update highest heart rate
+    if (maxHeartRate > highestHeartRate) {
+      setHighestHeartRate(maxHeartRate);
+      console.log(`New highest heart rate: ${maxHeartRate} bpm`);
+    }
+
+    // Check if goal is achieved (heart rate > 90) and we haven't shown modal or claimed reward yet
+    if (maxHeartRate > 90 && !hasShownGoalModal && !hasClaimedReward) {
+      console.log(`Goal achieved! Heart rate ${maxHeartRate} bpm exceeds target of 90 bpm`);
+      setShowGoalModal(true);
+      setHasShownGoalModal(true);
+    }
+  }, [currentHealthReading, historicalData, highestHeartRate, hasShownGoalModal, hasClaimedReward]);
 
   const isConnected = !!connectionStatus?.isConnected;
 
@@ -152,24 +192,41 @@ export const RingHealthDashboard: React.FC = () => {
     }
   };
 
-  // Sync step count from ring
-  const handleSyncSteps = async () => {
-    if (!isConnected || syncingSteps) return;
-
-    setSyncingSteps(true);
-    try {
-      const { healthDataSyncService } = await import('../ring/services/HealthDataSyncService');
-      await healthDataSyncService.fetchCurrentStepCount();
-
-      // Also trigger a manual sync to get latest historical data
-      await healthDataSyncService.triggerManualSync();
-
-      console.log('✅ Step count sync completed');
-    } catch (error) {
-      console.error("Failed to sync step count:", error);
-    } finally {
-      setSyncingSteps(false);
+  // Get the latest historical data point if no real-time monitoring is active
+  const getLatestVitals = () => {
+    if (monitoringActive && currentHealthReading) {
+      // Use real-time data when monitoring is active
+      return {
+        heartRate: currentHealthReading.heartRate,
+        bloodOxygen: currentHealthReading.bloodOxygen,
+        temperature: currentHealthReading.temperature,
+      };
+    } else if (historicalData && historicalData.length > 0) {
+      // Use the most recent historical data when not monitoring
+      const latestData = historicalData[historicalData.length - 1];
+      return {
+        heartRate: latestData.heartRate || null,
+        bloodOxygen: latestData.ox || null,
+        temperature: latestData.temperature || null,
+      };
     }
+    // Return null values if no data available
+    return {
+      heartRate: null,
+      bloodOxygen: null,
+      temperature: null,
+    };
+  };
+
+  const latestVitals = getLatestVitals();
+
+  const handleRewardClaimed = () => {
+    setHasClaimedReward(true);
+    setShowGoalModal(false);
+  };
+
+  const handleModalClose = () => {
+    setShowGoalModal(false);
   };
 
   if (!isConnected) {
@@ -193,12 +250,13 @@ export const RingHealthDashboard: React.FC = () => {
     : 0;
 
   return (
-    <ScrollView
-      style={styles.container}
-      refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
-      }
-    >
+    <>
+      <ScrollView
+        style={styles.container}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
+        }
+      >
       {/* Real-time Monitoring Control */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
@@ -245,63 +303,38 @@ export const RingHealthDashboard: React.FC = () => {
 
       {/* Current Health Metrics */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Current Vitals</Text>
+        <Text style={styles.sectionTitle}>
+          {monitoringActive ? "Current Vitals (Live)" : "Current Vitals (Last Recorded)"}
+        </Text>
         <View style={styles.metricsGrid}>
           <MetricCard
             title="Heart Rate"
-            value={currentHealthReading?.heartRate ?? "--"}
+            value={typeof latestVitals.heartRate === 'number' ? Math.round(latestVitals.heartRate) : "--"}
             unit="bpm"
             icon="❤️"
             color="#F44336"
-            trend={getHeartRateTrend(currentHealthReading?.heartRate)}
+            trend={monitoringActive && typeof latestVitals.heartRate === 'number' ? getHeartRateTrend(latestVitals.heartRate) : undefined}
           />
-          <MetricCard
-            title="Steps"
-            value={formatNumber(steps || 0)}
-            unit="steps"
-            icon="👟"
-            color="#4CAF50"
-          />
-          <TouchableOpacity
-            style={[styles.fetchButton, { marginTop: 8 }]}
-            onPress={handleSyncSteps}
-            disabled={syncingSteps}
-          >
-            {syncingSteps ? (
-              <ActivityIndicator size="small" color="#2196F3" />
-            ) : (
-              <Text style={styles.fetchButtonText}>Sync Steps</Text>
-            )}
-          </TouchableOpacity>
           <MetricCard
             title="SpO2"
-            value={currentHealthReading?.bloodOxygen ?? "--"}
+            value={typeof latestVitals.bloodOxygen === 'number' ? Math.round(latestVitals.bloodOxygen) : "--"}
             unit="%"
             icon="💨"
             color="#2196F3"
           />
           <MetricCard
             title="Temperature"
-            value={temperature != null ? temperature.toFixed(1) : "--"}
+            value={typeof latestVitals.temperature === 'number' && latestVitals.temperature !== null ? latestVitals.temperature.toFixed(1) : "--"}
             unit="°C"
             icon="🌡️"
             color="#FF9800"
           />
-          <MetricCard
-            title="Calories"
-            value={0}
-            unit="kcal"
-            icon="🔥"
-            color="#9C27B0"
-          />
-          <MetricCard
-            title="Distance"
-            value={(((steps || 0) * 0.8) / 1000).toFixed(2)}
-            unit="km"
-            icon="📍"
-            color="#00BCD4"
-          />
         </View>
+        {!monitoringActive && historicalData.length > 0 && (
+          <Text style={styles.lastUpdatedText}>
+            Last updated: {new Date(historicalData[historicalData.length - 1].timeStamp).toLocaleString()}
+          </Text>
+        )}
       </View>
 
       {/* Sleep Analysis */}
@@ -401,17 +434,19 @@ export const RingHealthDashboard: React.FC = () => {
         )}
       </View>
     </ScrollView>
+
+      {/* Goal Achievement Modal */}
+      <GoalAchievementModal
+        visible={showGoalModal}
+        onClose={handleModalClose}
+        highestHeartRate={Math.round(highestHeartRate)}
+        onRewardClaimed={handleRewardClaimed}
+      />
+    </>
   );
 };
 
 // Helper functions
-function formatNumber(num: number): string {
-  if (num >= 1000) {
-    return `${(num / 1000).toFixed(1)}k`;
-  }
-  return num.toString();
-}
-
 function formatDuration(minutes: number): string {
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
@@ -519,8 +554,14 @@ const styles = StyleSheet.create({
     marginHorizontal: -8,
   },
   metricCard: {
-    width: "50%",
-    padding: 8,
+    flex: 1,
+    backgroundColor: "#F8F8F8",
+    borderRadius: 12,
+    padding: 16,
+    marginHorizontal: 8,
+    marginBottom: 12,
+    borderLeftWidth: 4,
+    minWidth: 100,
   },
   metricHeader: {
     flexDirection: "row",
@@ -661,12 +702,16 @@ const styles = StyleSheet.create({
     backgroundColor: "#4CAF50",
   },
   monitoringStatus: {
-    flexDirection: "row",
-    alignItems: "center",
-    padding: 12,
-    backgroundColor: "#E8F5E9",
-    borderRadius: 8,
-    marginHorizontal: 16,
-    marginBottom: 8,
+    fontSize: 12,
+    color: "#4CAF50",
+    fontStyle: "italic",
+    marginTop: 4,
+  },
+  lastUpdatedText: {
+    fontSize: 12,
+    color: "#999",
+    fontStyle: "italic",
+    marginTop: 8,
+    textAlign: "center",
   },
 });
