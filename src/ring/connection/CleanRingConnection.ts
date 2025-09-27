@@ -311,11 +311,20 @@ export class CleanRingConnection {
               lastSeen: new Date()
             } as SmartRingX1);
             console.log(`✅ Ring device added to collection. Total devices: ${devices.size}`);
+
+            // Update store with discovered devices in real-time
+            const currentDevices = Array.from(devices.values());
+            useRingStore.getState().setDiscoveredDevices(currentDevices);
+            console.log(`📱 Updated store with ${currentDevices.length} discovered device(s)`);
           } else {
             // Update RSSI for existing device
             const existing = devices.get(device.id);
             if (existing) {
               existing.rssi = device.rssi || existing.rssi;
+
+              // Update store with updated device info
+              const currentDevices = Array.from(devices.values());
+              useRingStore.getState().setDiscoveredDevices(currentDevices);
             }
           }
         } else if (device.name) {
@@ -341,7 +350,10 @@ export class CleanRingConnection {
       
       const deviceArray = Array.from(devices.values());
       console.log(`🔍 Scan complete. Found ${deviceArray.length} devices`);
-      
+
+      // Final update to store with all discovered devices
+      useRingStore.getState().setDiscoveredDevices(deviceArray);
+
       return deviceArray;
       
     } catch (error) {
