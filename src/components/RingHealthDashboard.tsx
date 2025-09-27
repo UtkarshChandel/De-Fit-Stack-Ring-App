@@ -6,6 +6,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   ActivityIndicator,
+  Alert,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -17,6 +18,7 @@ import { cleanRingConnection } from "../ring/connection/CleanRingConnection";
 import { useRingStore } from "../ring/state/ringStore";
 import { SleepData } from "../types/ring";
 import { GoalAchievementModal } from "./GoalAchievementModal";
+import { ClearDataConfirmationModal } from "./ClearDataConfirmationModal";
 
 interface MetricCardProps {
   title: string;
@@ -92,6 +94,8 @@ export const RingHealthDashboard: React.FC = () => {
   const [highestHeartRate, setHighestHeartRate] = useState(0);
   const [hasShownGoalModal, setHasShownGoalModal] = useState(false);
   const [hasClaimedReward, setHasClaimedReward] = useState(false);
+  const [showClearConfirmation, setShowClearConfirmation] = useState(false);
+  const [isClearingData, setIsClearingData] = useState(false);
   const previousHeartRateRef = useRef<number>(0);
 
   const currentHealthReading = useRingStore(
@@ -227,6 +231,40 @@ export const RingHealthDashboard: React.FC = () => {
 
   const handleModalClose = () => {
     setShowGoalModal(false);
+  };
+
+  const handleClearData = async () => {
+    setIsClearingData(true);
+    try {
+      const success = await cleanRingConnection.clearAllHistoricalData();
+      if (success) {
+        // Reset goal tracking states since we're clearing all data
+        setHighestHeartRate(0);
+        setHasShownGoalModal(false);
+        setHasClaimedReward(false);
+        Alert.alert(
+          "Success",
+          "All historical data has been cleared successfully.",
+          [{ text: "OK" }]
+        );
+      } else {
+        Alert.alert(
+          "Error",
+          "Failed to clear data. Please try again.",
+          [{ text: "OK" }]
+        );
+      }
+    } catch (error) {
+      console.error("Error clearing data:", error);
+      Alert.alert(
+        "Error",
+        "An error occurred while clearing data. The device may have temporarily disconnected. Please check your connection and try again.",
+        [{ text: "OK" }]
+      );
+    } finally {
+      setIsClearingData(false);
+      setShowClearConfirmation(false);
+    }
   };
 
   if (!isConnected) {
@@ -397,17 +435,33 @@ export const RingHealthDashboard: React.FC = () => {
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Historical Data</Text>
-          <TouchableOpacity
-            style={styles.fetchButton}
-            onPress={handleFetchHistorical}
-            disabled={isHistoricalDataLoading}
-          >
-            {isHistoricalDataLoading ? (
-              <ActivityIndicator size="small" color="#2196F3" />
-            ) : (
-              <Text style={styles.fetchButtonText}>Fetch Data</Text>
-            )}
-          </TouchableOpacity>
+          <View style={styles.headerButtons}>
+            <TouchableOpacity
+              style={[styles.clearButton, isClearingData && styles.clearingButton]}
+              onPress={() => setShowClearConfirmation(true)}
+              disabled={isClearingData || historicalData.length === 0}
+            >
+              {isClearingData ? (
+                <ActivityIndicator size="small" color="#FFF" />
+              ) : (
+                <>
+                  <Text style={styles.clearButtonIcon}>🗑️</Text>
+                  <Text style={styles.clearButtonText}>Clear</Text>
+                </>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.fetchButton}
+              onPress={handleFetchHistorical}
+              disabled={isHistoricalDataLoading}
+            >
+              {isHistoricalDataLoading ? (
+                <ActivityIndicator size="small" color="#2196F3" />
+              ) : (
+                <Text style={styles.fetchButtonText}>Fetch Data</Text>
+              )}
+            </TouchableOpacity>
+          </View>
         </View>
 
         {historicalData.length > 0 ? (
@@ -441,6 +495,14 @@ export const RingHealthDashboard: React.FC = () => {
         onClose={handleModalClose}
         highestHeartRate={Math.round(highestHeartRate)}
         onRewardClaimed={handleRewardClaimed}
+      />
+
+      {/* Clear Data Confirmation Modal */}
+      <ClearDataConfirmationModal
+        visible={showClearConfirmation}
+        onClose={() => setShowClearConfirmation(false)}
+        onConfirm={handleClearData}
+        isClearing={isClearingData}
       />
     </>
   );
@@ -541,6 +603,10 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 16,
+  },
+  headerButtons: {
+    flexDirection: "row",
+    gap: 8,
   },
   sectionTitle: {
     fontSize: 18,
@@ -675,6 +741,26 @@ const styles = StyleSheet.create({
   fetchButtonText: {
     fontSize: 14,
     color: "#2196F3",
+    fontWeight: "600",
+  },
+  clearButton: {
+    flexDirection: "row",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: "#F44336",
+    borderRadius: 16,
+    alignItems: "center",
+    gap: 4,
+  },
+  clearingButton: {
+    opacity: 0.7,
+  },
+  clearButtonIcon: {
+    fontSize: 14,
+  },
+  clearButtonText: {
+    fontSize: 14,
+    color: "#FFF",
     fontWeight: "600",
   },
   historicalList: {
